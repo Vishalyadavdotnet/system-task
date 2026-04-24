@@ -72,11 +72,22 @@ public class ChannelsController : ControllerBase
             .Include(m => m.Reactions).ThenInclude(r => r.OrgMember)
             .ToListAsync();
 
-        var result = messages.AsEnumerable().Reverse().Select(m => new MessageResponse(
-            m.Id, m.ChannelId, m.SenderId, m.Sender?.Name, m.ReplyToId, m.Content,
-            m.ContentType.ToString().ToLower(), m.IsEdited, m.IsDeleted, m.CreatedAt, m.UpdatedAt,
-            m.Attachments.Select(a => new AttachmentResponse(a.Id, a.FileName, a.FileType, a.FileSizeKb)).ToList(),
-            m.Reactions.Select(r => new ReactionResponse(r.Id, r.Emoji, r.OrgMemberId, r.OrgMember?.Name)).ToList()));
+        var result = messages.AsEnumerable().Reverse().Select(m => {
+            string? senderName = m.Sender?.Name;
+            if (string.IsNullOrEmpty(senderName) && m.Metadata != null)
+            {
+                if (m.Metadata.RootElement.TryGetProperty("sender_name", out var prop))
+                {
+                    senderName = prop.GetString();
+                }
+            }
+
+            return new MessageResponse(
+                m.Id, m.ChannelId, m.SenderId, senderName, m.ReplyToId, m.Content,
+                m.ContentType.ToString().ToLower(), m.IsEdited, m.IsDeleted, m.CreatedAt, m.UpdatedAt,
+                m.Attachments.Select(a => new AttachmentResponse(a.Id, a.FileName, a.FileType, a.FileSizeKb)).ToList(),
+                m.Reactions.Select(r => new ReactionResponse(r.Id, r.Emoji, r.OrgMemberId, r.OrgMember?.Name)).ToList());
+        });
 
         return Ok(result);
     }
