@@ -84,51 +84,67 @@ public class WebhooksController : ControllerBase
 
         foreach (var msg in request.Messages)
         {
-            _logger.LogInformation("📩 Processing message for Chat: '{Chat}', Sender: '{Sender}'", msg.Chat, msg.Sender);
+            // Normalize chat name to prevent duplicate channels
+            var chatName = (msg.Chat ?? "Unknown").Trim();
+            var senderName = (msg.Sender ?? "Unknown").Trim();
+            var messageContent = (msg.Message ?? "").Trim();
 
-            // Find or create Channel for this Chat
-            var channel = await _db.Channels.FirstOrDefaultAsync(c => c.AppId == app.Id && c.Name == msg.Chat);
+            if (string.IsNullOrEmpty(messageContent)) continue;
+
+            _logger.LogInformation("📩 Processing message for Chat: '{Chat}', Sender: '{Sender}'", chatName, senderName);
+
+            // Find channel — pick the OLDEST one if duplicates exist (fixes race condition)
+            var channel = await _db.Channels
+                .Where(c => c.AppId == app.Id && c.Name.ToLower() == chatName.ToLower())
+                .OrderBy(c => c.CreatedAt)
+                .FirstOrDefaultAsync();
+
             if (channel == null)
             {
                 channel = new Channel
                 {
                     AppId = app.Id,
                     OrgId = org.Id,
-                    Name = msg.Chat,
+                    Name = chatName,
                     ChannelType = ChannelTypeEnum.General
                 };
                 _db.Channels.Add(channel);
                 await _db.SaveChangesAsync();
-                _logger.LogInformation("🆕 Created new Channel: '{Chat}'", msg.Chat);
+                _logger.LogInformation("🆕 Created new Channel: '{Chat}'", chatName);
             }
 
             // Create timestamp
             var msgTime = DateTimeOffset.FromUnixTimeMilliseconds(msg.Time).UtcDateTime;
 
-            // Simple duplicate check within a 1-minute window
-            var timeMin = msgTime.AddMinutes(-1);
-            var timeMax = msgTime.AddMinutes(1);
+            // Duplicate check: search across ALL channels with same chat name within 2 min window
+            var allChannelIds = await _db.Channels
+                .Where(c => c.AppId == app.Id && c.Name.ToLower() == chatName.ToLower())
+                .Select(c => c.Id)
+                .ToListAsync();
+
+            var timeMin = msgTime.AddMinutes(-2);
+            var timeMax = msgTime.AddMinutes(2);
             var exists = await _db.Messages.AnyAsync(m => 
-                m.ChannelId == channel.Id && 
-                m.Content == msg.Message && 
+                allChannelIds.Contains(m.ChannelId) && 
+                m.Content == messageContent && 
                 m.CreatedAt >= timeMin && 
                 m.CreatedAt <= timeMax);
 
             if (!exists)
             {
-                var metadataJson = JsonSerializer.Serialize(new { sender_name = msg.Sender });
+                var metadataJson = JsonSerializer.Serialize(new { sender_name = senderName });
                 var message = new Message
                 {
                     ChannelId = channel.Id,
                     OrgId = org.Id,
-                    Content = msg.Message,
+                    Content = messageContent,
                     CreatedAt = msgTime,
                     UpdatedAt = msgTime,
                     Metadata = JsonDocument.Parse(metadataJson)
                 };
                 _db.Messages.Add(message);
                 addedCount++;
-                _logger.LogInformation("💾 Saved new message to DB: '{Msg}'", msg.Message);
+                _logger.LogInformation("💾 Saved new message to DB: '{Msg}'", messageContent);
             }
             else
             {
