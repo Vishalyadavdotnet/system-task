@@ -112,7 +112,8 @@ public record MessageResponse(
     DateTime CreatedAt,
     DateTime UpdatedAt,
     List<AttachmentResponse>? Attachments,
-    List<ReactionResponse>? Reactions
+    List<ReactionResponse>? Reactions,
+    object? Metadata = null
 );
 
 public record AttachmentResponse(Guid Id, string FileName, string FileType, int? FileSizeKb);

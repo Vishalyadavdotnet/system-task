@@ -28,6 +28,8 @@ public class WebhooksController : ControllerBase
         public string Sender { get; set; } = string.Empty;
         public string Message { get; set; } = string.Empty;
         public long Time { get; set; }
+        public bool IsOutgoing { get; set; } = false;
+        public string? ReplyToContent { get; set; }
     }
 
     public class SyncRequestDto
@@ -73,18 +75,23 @@ public class WebhooksController : ControllerBase
         }
 
         // Find or create the App
-        var app = await _db.Apps.FirstOrDefaultAsync(a => a.OrgId == org.Id && a.Name == "WhatsApp Interceptor");
+        var app = await _db.Apps.FirstOrDefaultAsync(a => a.OrgId == org.Id && (a.Name == "WhatsApp" || a.Name == "WhatsApp Interceptor"));
         if (app == null)
         {
             app = new App
             {
                 OrgId = org.Id,
-                Name = "WhatsApp Interceptor",
+                Name = "WhatsApp",
                 AppType = AppTypeEnum.Chat
             };
             _db.Apps.Add(app);
             await _db.SaveChangesAsync();
-            _logger.LogInformation("🆕 Created new App: WhatsApp Interceptor");
+            _logger.LogInformation("🆕 Created new App: WhatsApp");
+        }
+        else if (app.Name == "WhatsApp Interceptor")
+        {
+            app.Name = "WhatsApp";
+            await _db.SaveChangesAsync();
         }
 
         int addedCount = 0;
@@ -139,43 +146,52 @@ public class WebhooksController : ControllerBase
 
             if (!exists)
             {
-                // Try to resolve sender_id from the senderName
+                // Resolve sender_id using is_outgoing flag (most reliable)
                 Guid? resolvedSenderId = null;
-                string sName = (senderName ?? "").ToLower();
-
-                // 1. Handle "You" (always the owner)
-                if (sName == "you" || sName == "me")
+                
+                if (msg.IsOutgoing || senderName.ToLower() == "you" || senderName.ToLower() == "me")
                 {
+                    // Outgoing = phone owner (admin)
                     var owner = await _db.OrgMembers
-                        .Where(m => m.OrgId == org.Id && (m.Role == MemberRoleEnum.Admin || m.Email.Contains("vishal")))
+                        .Where(m => m.OrgId == org.Id && m.Role == MemberRoleEnum.Admin)
                         .FirstOrDefaultAsync();
                     resolvedSenderId = owner?.Id;
                 }
                 else
                 {
-                    // 2. Smart keyword match (e.g., "Vishal Jio" matches "Vishal Yadav")
+                    // Try keyword match for incoming messages
+                    string sName = senderName.ToLower();
                     var member = _db.OrgMembers
                         .Where(m => m.OrgId == org.Id)
-                        .AsEnumerable() // Pull for smart matching
+                        .AsEnumerable()
                         .FirstOrDefault(m => 
                             m.Name.ToLower() == sName || 
                             sName.Contains(m.Name.ToLower()) ||
-                            m.Name.ToLower().Contains(sName.Split(' ')[0])); // Match first name
-                    
+                            m.Name.ToLower().Split(' ')[0] == sName.Split(' ')[0]);
                     resolvedSenderId = member?.Id;
                 }
-                
-                if (resolvedSenderId != null)
+
+                // Resolve reply_to_id from content match
+                Guid? replyToId = null;
+                if (!string.IsNullOrEmpty(msg.ReplyToContent))
                 {
-                    _logger.LogInformation("🎯 [MATCHED] Linked '{Name}' to MemberId: {Id}", senderName, resolvedSenderId);
+                    var replyTarget = await _db.Messages
+                        .Where(m => m.ChannelId == channel.Id && m.Content == msg.ReplyToContent.Trim())
+                        .OrderByDescending(m => m.CreatedAt)
+                        .FirstOrDefaultAsync();
+                    replyToId = replyTarget?.Id;
                 }
 
-                var metadataJson = JsonSerializer.Serialize(new { sender_name = senderName });
+                var metadataJson = JsonSerializer.Serialize(new { 
+                    sender_name = senderName,
+                    is_outgoing = msg.IsOutgoing
+                });
                 var message = new Message
                 {
                     ChannelId = channel.Id,
                     OrgId = org.Id,
                     SenderId = resolvedSenderId,
+                    ReplyToId = replyToId,
                     Content = messageContent,
                     CreatedAt = msgTime,
                     UpdatedAt = msgTime,
@@ -183,7 +199,7 @@ public class WebhooksController : ControllerBase
                 };
                 _db.Messages.Add(message);
                 addedCount++;
-                _logger.LogInformation("💾 Saved new message to DB: '{Msg}' (SenderId: {SenderId})", messageContent, resolvedSenderId);
+                _logger.LogInformation("💾 Saved: '{Msg}' | Outgoing: {Out} | SenderId: {Id} | ReplyTo: {Reply}", messageContent, msg.IsOutgoing, resolvedSenderId, replyToId);
             }
             else
             {

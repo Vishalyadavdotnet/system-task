@@ -82,11 +82,30 @@ public class ChannelsController : ControllerBase
                 }
             }
 
+            // Extract metadata as a dictionary for the frontend
+            Dictionary<string, object?>? meta = null;
+            if (m.Metadata != null)
+            {
+                meta = new Dictionary<string, object?>();
+                foreach (var p in m.Metadata.RootElement.EnumerateObject())
+                {
+                    meta[p.Name] = p.Value.ValueKind switch
+                    {
+                        System.Text.Json.JsonValueKind.True => true,
+                        System.Text.Json.JsonValueKind.False => false,
+                        System.Text.Json.JsonValueKind.String => p.Value.GetString(),
+                        System.Text.Json.JsonValueKind.Number => p.Value.GetDouble(),
+                        _ => p.Value.ToString()
+                    };
+                }
+            }
+
             return new MessageResponse(
                 m.Id, m.ChannelId, m.SenderId, senderName, m.ReplyToId, m.Content,
                 m.ContentType.ToString().ToLower(), m.IsEdited, m.IsDeleted, m.CreatedAt, m.UpdatedAt,
                 m.Attachments.Select(a => new AttachmentResponse(a.Id, a.FileName, a.FileType, a.FileSizeKb)).ToList(),
-                m.Reactions.Select(r => new ReactionResponse(r.Id, r.Emoji, r.OrgMemberId, r.OrgMember?.Name)).ToList());
+                m.Reactions.Select(r => new ReactionResponse(r.Id, r.Emoji, r.OrgMemberId, r.OrgMember?.Name)).ToList(),
+                meta);
         });
 
         return Ok(result);
