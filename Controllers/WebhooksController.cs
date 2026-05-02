@@ -32,6 +32,7 @@ public class WebhooksController : ControllerBase
 
     public class SyncRequestDto
     {
+        public string? OrgSlug { get; set; }
         public List<SyncMessageDto> Messages { get; set; } = new();
     }
 
@@ -55,10 +56,16 @@ public class WebhooksController : ControllerBase
             return Ok(new { message = "No messages to sync." });
         }
 
-        _logger.LogInformation("✅ [WEBHOOK ACCEPTED] Received {Count} messages from Android app.", request.Messages.Count);
+        _logger.LogInformation("✅ [WEBHOOK ACCEPTED] Received {Count} messages. OrgSlug: {OrgSlug}", request.Messages.Count, request.OrgSlug);
 
-        // For this single-user deployment, just grab the first Organization
-        var org = await _db.Organizations.FirstOrDefaultAsync();
+        // Identify Organization
+        var orgSlug = request.OrgSlug ?? "new-startup";
+        var org = await _db.Organizations.FirstOrDefaultAsync(o => o.Slug == orgSlug);
+        
+        if (org == null)
+        {
+            org = await _db.Organizations.FirstOrDefaultAsync();
+        }
         if (org == null)
         {
             _logger.LogError("❌ [WEBHOOK ERROR] No organization found in database!");
@@ -132,11 +139,43 @@ public class WebhooksController : ControllerBase
 
             if (!exists)
             {
+                // Try to resolve sender_id from the senderName
+                Guid? resolvedSenderId = null;
+                string sName = (senderName ?? "").ToLower();
+
+                // 1. Handle "You" (always the owner)
+                if (sName == "you" || sName == "me")
+                {
+                    var owner = await _db.OrgMembers
+                        .Where(m => m.OrgId == org.Id && (m.Role == MemberRoleEnum.Admin || m.Email.Contains("vishal")))
+                        .FirstOrDefaultAsync();
+                    resolvedSenderId = owner?.Id;
+                }
+                else
+                {
+                    // 2. Smart keyword match (e.g., "Vishal Jio" matches "Vishal Yadav")
+                    var member = _db.OrgMembers
+                        .Where(m => m.OrgId == org.Id)
+                        .AsEnumerable() // Pull for smart matching
+                        .FirstOrDefault(m => 
+                            m.Name.ToLower() == sName || 
+                            sName.Contains(m.Name.ToLower()) ||
+                            m.Name.ToLower().Contains(sName.Split(' ')[0])); // Match first name
+                    
+                    resolvedSenderId = member?.Id;
+                }
+                
+                if (resolvedSenderId != null)
+                {
+                    _logger.LogInformation("🎯 [MATCHED] Linked '{Name}' to MemberId: {Id}", senderName, resolvedSenderId);
+                }
+
                 var metadataJson = JsonSerializer.Serialize(new { sender_name = senderName });
                 var message = new Message
                 {
                     ChannelId = channel.Id,
                     OrgId = org.Id,
+                    SenderId = resolvedSenderId,
                     Content = messageContent,
                     CreatedAt = msgTime,
                     UpdatedAt = msgTime,
@@ -144,7 +183,7 @@ public class WebhooksController : ControllerBase
                 };
                 _db.Messages.Add(message);
                 addedCount++;
-                _logger.LogInformation("💾 Saved new message to DB: '{Msg}'", messageContent);
+                _logger.LogInformation("💾 Saved new message to DB: '{Msg}' (SenderId: {SenderId})", messageContent, resolvedSenderId);
             }
             else
             {
